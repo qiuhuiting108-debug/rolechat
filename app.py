@@ -1,277 +1,234 @@
-import io
-import os
-import time
-import base64
-from dataclasses import dataclass, asdict
-from typing import List, Optional
+# ============================================================
+# 🎭 Role-based Creative Chatbot + Image Studio (Integrated Pro Version)
+# Author: Huiting Qiu x GPT-5
+# For: Art & Advanced Big Data · Role-based AI + Visual Studio
+# ============================================================
 
 import streamlit as st
-from PIL import Image
+import io
+import time
+import base64
+from dataclasses import dataclass
+from typing import List, Optional
 from openai import OpenAI
+from PIL import Image
 
-# -----------------------------
-# App Meta
-# -----------------------------
+# ------------------------------------------------------------
+# 🌈 Page Setup
+# ------------------------------------------------------------
 st.set_page_config(
     page_title="Role-based Creative Chatbot + Image Studio",
-    page_icon="🎭",
+    page_icon="🎬",
     layout="wide"
 )
 
-# -----------------------------
-# Sidebar: API & Role Settings
-# -----------------------------
-with st.sidebar:
-    st.markdown("### 🔑 API & Role Settings")
-    api_key = st.text_input("Enter your OpenAI API Key:", type="password", help="Required for image generation.")
-    role = st.selectbox(
-        "Choose a role:",
-        [
-            "Video Director",
-            "Fashion Consultant",
-            "Dance Coach",
-            "Performing Arts Critic",
-            "Graphic Designer",
-            "Storyboard Artist"
-        ],
-        index=0
-    )
-    st.markdown(
-        "You visualize stories and direct how they are brought to life on screen."
-        if role == "Video Director" else
-        "You guide aesthetics and craft compelling visuals."
-    )
+# ------------------------------------------------------------
+# 🎛️ Sidebar: API + Model + Role Settings
+# ------------------------------------------------------------
+st.sidebar.markdown("### 🔑 API & Role Settings")
 
-# Prepare OpenAI client (lazy)
-def get_client(_key: str) -> Optional[OpenAI]:
-    if not _key:
+api_key = st.sidebar.text_input("Enter your OpenAI API Key", type="password")
+model = st.sidebar.selectbox(
+    "Model",
+    ["gpt-4.1-mini", "gpt-4o", "gpt-4-turbo", "gpt-3.5-turbo"],
+    index=0
+)
+
+role = st.sidebar.selectbox(
+    "Choose a role 🎭",
+    [
+        "Video Director 🎬",
+        "Fashion Designer 👗",
+        "Storyboard Artist ✏️",
+        "Graphic Designer 🎨",
+        "Performer 🎭"
+    ],
+    index=0
+)
+
+# Role descriptions & system prompts
+ROLE_DESCRIPTIONS = {
+    "Video Director 🎬": {
+        "desc": "Analyzes mood, camera angle, lighting.",
+        "prompt": (
+            "You are a professional film director. Always analyze ideas in terms of visual storytelling — "
+            "use camera movement, lighting, framing, editing, and emotional tone to explain your thoughts. "
+            "Describe concepts as if you are planning a film scene or visual sequence."
+        )
+    },
+    "Fashion Designer 👗": {
+        "desc": "Focuses on color harmony, texture, silhouette.",
+        "prompt": (
+            "You are an avant-garde fashion designer. Think in terms of form, fabric, tone, "
+            "and how clothing expresses emotion, era, and identity."
+        )
+    },
+    "Storyboard Artist ✏️": {
+        "desc": "Creates composition sketches, camera layout, and timing cues.",
+        "prompt": (
+            "You are a storyboard artist. Visualize action beats, body language, and composition. "
+            "Explain the scene framing with cinematic clarity."
+        )
+    },
+    "Graphic Designer 🎨": {
+        "desc": "Balances composition, typography, and color palette.",
+        "prompt": (
+            "You are a professional graphic designer. Focus on layout, composition, and how design communicates mood. "
+            "Think visually and describe spatial balance and rhythm."
+        )
+    },
+    "Performer 🎭": {
+        "desc": "Analyzes emotion, posture, gesture, and audience impact.",
+        "prompt": (
+            "You are a stage performer and actor. Express emotional tone, gesture, and performance dynamics. "
+            "Explain how to evoke empathy and rhythm in storytelling."
+        )
+    },
+}
+
+role_info = ROLE_DESCRIPTIONS[role]
+st.sidebar.markdown(f"**Role description:** {role_info['desc']}")
+with st.sidebar.expander("🧠 System prompt used for this role"):
+    st.markdown(role_info["prompt"])
+
+# ------------------------------------------------------------
+# 🧠 Session States
+# ------------------------------------------------------------
+if "chat_history" not in st.session_state:
+    st.session_state.chat_history = []
+if "history" not in st.session_state:
+    st.session_state.history = []
+
+
+# ------------------------------------------------------------
+# 🧩 Helpers
+# ------------------------------------------------------------
+def get_client():
+    if not api_key:
         return None
     try:
-        return OpenAI(api_key=_key)
+        return OpenAI(api_key=api_key)
     except Exception:
         return None
 
-# -----------------------------
-# Session State for Image History
-# -----------------------------
-@dataclass
-class GenParams:
-    prompt: str
-    negative_prompt: str
-    style: str
-    size: str
-    n_images: int
-    seed: Optional[int]
-    bg_transparent: bool
-    quality: str
 
-@dataclass
-class GenResult:
-    timestamp: float
-    params: GenParams
-    images_b64: List[str]  # base64 PNGs
+def generate_chat_response(prompt):
+    """Generate chat response with OpenAI API."""
+    client = get_client()
+    if not client:
+        st.error("⚠️ Please enter a valid API Key.")
+        return None
 
-if "history" not in st.session_state:
-    st.session_state.history: List[GenResult] = []
+    messages = [{"role": "system", "content": role_info["prompt"]}]
+    for msg in st.session_state.chat_history:
+        messages.append({"role": msg["role"], "content": msg["content"]})
+    messages.append({"role": "user", "content": prompt})
 
-# -----------------------------
-# Helpers
-# -----------------------------
-SIZES = {
-    "Square (1024x1024)": "1024x1024",
-    "Landscape (1344x768)": "1344x768",
-    "Portrait (768x1344)": "768x1344",
-    "Large Square (2048x2048)": "2048x2048"
-}
+    resp = client.chat.completions.create(model=model, messages=messages)
+    content = resp.choices[0].message.content
+    return content
 
-STYLE_HINTS = {
-    "Cinematic": "cinematic lighting, shallow depth of field, filmic color grading, dramatic composition",
-    "Concept Art": "highly detailed concept art, artstation quality, mood painting, volumetric light",
-    "Poster Graphic": "bold poster design, vector-like clarity, balanced negative space, strong typography placeholders",
-    "Watercolor": "soft watercolor texture, natural paper grain, gentle bleeding edges",
-    "3D Render": "physically-based rendering, soft studio lighting, subsurface scattering",
-    "Anime": "clean line art, cel shading, expressive character styling"
-}
-
-def style_prompt(role_name: str, base: str, style_key: str) -> str:
-    style = STYLE_HINTS.get(style_key, "")
-    role_instructions = {
-        "Video Director": "Compose shots like a storyboard frame; emphasize emotion, blocking, and lighting motivation.",
-        "Fashion Consultant": "Focus on outfit silhouette, fabric texture, and color harmony; editorial styling.",
-        "Dance Coach": "Capture dynamic body lines, rhythm, and motion arcs; sense of stage lighting.",
-        "Performing Arts Critic": "Emphasize atmosphere, dramaturgy, and audience perspective.",
-        "Graphic Designer": "Prioritize layout balance, iconic shapes, and color contrast; print-friendly.",
-        "Storyboard Artist": "Clear framing, character poses, arrows for motion; readable beat."
-    }.get(role_name, "")
-    parts = [base]
-    if style:
-        parts.append(style)
-    if role_instructions:
-        parts.append(role_instructions)
-    return ", ".join([p for p in parts if p])
 
 def b64_to_pil(b64png: str) -> Image.Image:
     return Image.open(io.BytesIO(base64.b64decode(b64png)))
 
-def download_button_for_image(img: Image.Image, filename: str):
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    st.download_button("Download PNG", data=buf.getvalue(), file_name=filename, mime="image/png")
 
-# -----------------------------
-# Header
-# -----------------------------
+# ------------------------------------------------------------
+# 🎭 Main Layout
+# ------------------------------------------------------------
 st.markdown("# 🎭 Role-based Creative Chatbot + Image Studio")
-tabs = st.tabs(["💬 Chat Assistant", "🖼️ Image Studio"])
 
-# -----------------------------
-# Tab 1: (Placeholder) Chat Assistant
-# -----------------------------
-with tabs[0]:
-    st.subheader(f"🎬 {role} — Creative Chat Assistant")
-    st.caption("Ask role-specific questions. (This demo focuses on the Image Studio below.)")
-    user_q = st.text_area("Enter your question or idea:", height=120, placeholder="e.g. How can I make my short film emotionally powerful?")
-    if st.button("✨ Generate Response", use_container_width=True):
-        if not api_key:
-            st.warning("Please enter your OpenAI API Key in the sidebar.")
-        else:
-            # Simple guidance response (no tool-calling to keep example focused)
-            st.write(f"As a **{role}**, here are three actionable ideas to start:")
-            st.markdown(
-                "- Define a clear emotional arc with 3 turning points.\n"
-                "- Use visual motifs (color, framing) to echo character psychology.\n"
-                "- Design sound transitions that carry emotion across cuts."
-            )
+tab_chat, tab_image = st.tabs(["💬 Chat Assistant", "🖼️ Image Studio"])
 
-# -----------------------------
-# Tab 2: Image Studio (Main)
-# -----------------------------
-with tabs[1]:
-    st.subheader("🖼️ Image Studio")
-    st.caption("Design and visualize ideas with AI. Choose style, size, and generate multiple variations.")
+# ============================================================
+# 💬 CHAT ASSISTANT
+# ============================================================
+with tab_chat:
+    col1, col2 = st.columns([2, 1])
 
-    colA, colB = st.columns([2, 1], vertical_alignment="top")
-    with colA:
-        base_prompt = st.text_area(
-            "Prompt",
-            placeholder="Describe the image you want. Include subject, setting, mood, lighting, colors…",
-            height=140
+    with col1:
+        st.subheader(f"{role} — Creative Assistant")
+        user_input = st.text_area(
+            "Enter your question or idea:",
+            placeholder="e.g. How can I shoot a dream sequence?",
+            height=130
         )
-        negative_prompt = st.text_input(
-            "Negative Prompt (optional)",
-            placeholder="blurry, low quality, distorted anatomy, text artifacts"
-        )
-
-    with colB:
-        style = st.selectbox("Style Preset", list(STYLE_HINTS.keys()), index=0)
-        size_label = st.selectbox("Image Size", list(SIZES.keys()), index=0)
-        n_images = st.slider("Variations", min_value=1, max_value=8, value=4, help="Number of images to generate")
-        seed_opt = st.text_input("Seed (optional, integer)", value="", help="Leave blank for random")
-        bg_transparent = st.toggle("Transparent Background (PNG)", value=False)
-        quality = st.select_slider("Quality", options=["standard", "hd"], value="standard")
-        seed_val = None
-        if seed_opt.strip():
-            try:
-                seed_val = int(seed_opt.strip())
-            except ValueError:
-                st.warning("Seed must be an integer. Ignoring.")
-
-    # Generate
-    run = st.button("🚀 Generate Images", use_container_width=True, type="primary")
-
-    # Guard
-    if run:
-        if not api_key:
-            st.error("Please enter your OpenAI API Key in the sidebar.")
-        elif not base_prompt.strip():
-            st.error("Please enter a prompt.")
-        else:
-            client = get_client(api_key)
-            if not client:
-                st.error("Invalid API Key or client initialization failed.")
+        if st.button("✨ Generate Response", use_container_width=True):
+            if not user_input.strip():
+                st.warning("Please enter your question first.")
             else:
-                final_prompt = style_prompt(role, base_prompt.strip(), style)
-                if negative_prompt.strip():
-                    final_prompt += f". Avoid: {negative_prompt.strip()}."
+                response = generate_chat_response(user_input)
+                if response:
+                    st.session_state.chat_history.append({"role": "user", "content": user_input})
+                    st.session_state.chat_history.append({"role": "assistant", "content": response})
 
-                st.info("Generating images…")
+    with col2:
+        st.subheader("💭 Conversation History (bubble view)")
+        if len(st.session_state.chat_history) == 0:
+            st.info("아직 대화가 없습니다. 질문을 한 번 해보세요!")
+        else:
+            for msg in st.session_state.chat_history:
+                if msg["role"] == "user":
+                    st.markdown(f'<div style="background:#DCF8C6;padding:8px 12px;border-radius:10px;margin:6px 0;">🧑‍🎨 <b>You:</b> {msg["content"]}</div>', unsafe_allow_html=True)
+                else:
+                    st.markdown(f'<div style="background:#E8E8E8;padding:8px 12px;border-radius:10px;margin:6px 0;">🤖 <b>AI:</b> {msg["content"]}</div>', unsafe_allow_html=True)
+        if st.button("🗑️ Clear history"):
+            st.session_state.chat_history.clear()
+
+# ============================================================
+# 🖼️ IMAGE STUDIO
+# ============================================================
+with tab_image:
+    st.subheader("🖼️ AI Image Studio")
+    st.caption("Visualize your creative idea with AI image generation.")
+
+    colA, colB = st.columns([2, 1])
+
+    with colA:
+        prompt = st.text_area("Image Prompt", placeholder="Describe your visual idea...", height=130)
+        negative = st.text_input("Negative Prompt (optional)", placeholder="e.g. blurry, text artifacts, bad lighting")
+    with colB:
+        size = st.selectbox("Image Size", ["1024x1024", "1344x768", "768x1344", "2048x2048"], index=0)
+        n_images = st.slider("Number of Images", 1, 6, 3)
+        bg_trans = st.toggle("Transparent Background", False)
+        quality = st.select_slider("Quality", options=["standard", "hd"], value="standard")
+
+    if st.button("🚀 Generate Images", type="primary", use_container_width=True):
+        if not api_key:
+            st.error("⚠️ Please enter your OpenAI API Key.")
+        elif not prompt.strip():
+            st.warning("Please enter a prompt.")
+        else:
+            client = get_client()
+            with st.spinner("Generating images..."):
                 try:
-                    # OpenAI Images API: gpt-image-1
-                    # Docs: https://platform.openai.com/docs/guides/images
-                    gen = client.images.generate(
+                    result = client.images.generate(
                         model="gpt-image-1",
-                        prompt=final_prompt,
-                        size=SIZES[size_label],
+                        prompt=f"{prompt}\nStyle: {role_info['prompt']}",
+                        size=size,
                         n=n_images,
-                        background="transparent" if bg_transparent else "white",
                         quality=quality,
-                        seed=seed_val
+                        background="transparent" if bg_trans else "white"
                     )
-                    images_b64 = [d.b64_json for d in gen.data]
-                    # Save to history
-                    params = GenParams(
-                        prompt=base_prompt.strip(),
-                        negative_prompt=negative_prompt.strip(),
-                        style=style,
-                        size=SIZES[size_label],
-                        n_images=n_images,
-                        seed=seed_val,
-                        bg_transparent=bg_transparent,
-                        quality=quality
-                    )
-                    st.session_state.history.insert(0, GenResult(time.time(), params, images_b64))
-                    st.success("Done! See results below.")
+                    images_b64 = [d.b64_json for d in result.data]
+                    st.session_state.history.insert(0, images_b64)
+                    st.success("✅ Images generated successfully!")
                 except Exception as e:
-                    st.exception(e)
+                    st.error(str(e))
 
-    # Results (latest run)
     if st.session_state.history:
-        latest: GenResult = st.session_state.history[0]
         st.markdown("### ⭐ Latest Results")
-        meta1, meta2, meta3 = st.columns([2, 2, 2])
-        with meta1:
-            st.write("**Style:**", latest.params.style)
-            st.write("**Size:**", latest.params.size)
-        with meta2:
-            st.write("**Variations:**", latest.params.n_images)
-            st.write("**Quality:**", latest.params.quality)
-        with meta3:
-            st.write("**Seed:**", latest.params.seed if latest.params.seed is not None else "random")
-            st.write("**Background:**", "Transparent" if latest.params.bg_transparent else "White")
+        cols = st.columns(2)
+        latest = st.session_state.history[0]
+        for i, b64img in enumerate(latest):
+            with cols[i % 2]:
+                img = b64_to_pil(b64img)
+                st.image(img, use_column_width=True, caption=f"Image {i+1}")
+                buf = io.BytesIO()
+                img.save(buf, format="PNG")
+                st.download_button("Download", buf.getvalue(), f"image_{i+1}.png", "image/png")
 
-        # Gallery
-        cols = st.columns(2, vertical_alignment="top")
-        for i, b64img in enumerate(latest.images_b64, start=1):
-            pil_img = b64_to_pil(b64img)
-            with cols[(i - 1) % 2]:
-                st.image(pil_img, use_column_width=True, caption=f"Variation {i}")
-                filename = f"image_{int(latest.timestamp)}_{i}.png"
-                download_button_for_image(pil_img, filename)
-
-        st.divider()
-
-        # History Accordion
-        with st.expander("🗂️ Generation History"):
-            for idx, item in enumerate(st.session_state.history):
-                with st.container(border=True):
-                    st.markdown(f"**Run #{len(st.session_state.history) - idx}** – {time.strftime('%Y-%m-%d %H:%M:%S', time.localtime(item.timestamp))}")
-                    st.caption(
-                        f"Prompt: {item.params.prompt}\n\n"
-                        f"Negative: {item.params.negative_prompt or '(none)'}\n"
-                        f"Style: {item.params.style} | Size: {item.params.size} | N: {item.params.n_images} | "
-                        f"Seed: {item.params.seed if item.params.seed is not None else 'random'} | "
-                        f"BG: {'Transparent' if item.params.bg_transparent else 'White'} | "
-                        f"Quality: {item.params.quality}"
-                    )
-                    cols_h = st.columns(4)
-                    for j, b64img in enumerate(item.images_b64, start=1):
-                        pil_img = b64_to_pil(b64img)
-                        with cols_h[(j - 1) % 4]:
-                            st.image(pil_img, use_column_width=True, caption=f"#{j}")
-    else:
-        st.info("No images yet. Enter a prompt and click **Generate Images**.")
-
-# -----------------------------
+# ------------------------------------------------------------
 # Footer
-# -----------------------------
-st.caption("Built for Arts & Advanced Big Data · Role-based Chatbot + Image Studio")
+# ------------------------------------------------------------
+st.caption("Built for Art & Advanced Big Data · Huiting Qiu · 2025")
